@@ -1,0 +1,15 @@
+# QTIFF feature extraction requirements
+# Install from STAMP/multiplex-notebooks_qtif:
+#   python -m pip install -r requirements.txt
+
+# Local STAMP package (provides stamp.preprocessing.extractor.kronos)
+-e ..
+
+# Core runtime dependencies
+torch
+torchvision
+h5py
+PyYAML
+tifffile
+imagecodecs
+tqdm

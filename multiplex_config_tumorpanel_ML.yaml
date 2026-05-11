@@ -1,0 +1,63 @@
+# Multiplex Feature Extraction Configuration
+# Used by extract_features_split_channels.py and extract_features_multi_channels.py
+
+# Root directory containing *.unmixed.qptiff files (searched recursively)
+multiplex_image_path: "/mnt/copernicus3/PATHOLOGY/others/private/IMPALUX/data/Vorversuche_2_WSI/Tumorpanel_WSI"
+
+# Device for inference ("cuda", "cuda:0", "cpu")
+device: "cuda"
+
+model:
+  checkpoint_path: "hf_hub:MahmoodLab/kronos"
+  hf_auth_token: "hf_..."
+  cache_dir: "./model_assets"
+  model_type: "vits16"   # "vits16" (patch 64/32) or "vitl16" (patch 256)
+  token_overlap: false
+
+# Markers listed in the order they appear as channels in the qptiff.
+# mean/std are per-channel normalization statistics.
+markers:
+  - name: "DAPI"
+    mean: 36.490348930888
+    std:  71.710991402312
+  - name: "cMET"
+    mean: 3.937632862342
+    std:  23.776266024742
+  - name: "PanCK"
+    mean: 19.653803764969
+    std:  85.480230598573
+  - name: "DLL3"
+    mean: 10.159915343175
+    std:  58.933232586249
+  - name: "Prame"
+    mean: 10.481099228421
+    std:  78.528128142742
+  - name: "HER2"
+    mean: 15.747066068916
+    std:  126.899451547812
+  - name: "Trop2"
+    mean: 16.734462858589
+    std:  66.414082273847
+
+# --- Split-channel mode ---
+# One H5 file per (patient, marker): {patient_stem}_{marker_name}.h5
+# Only stores patch_embeddings, coord_x, coord_y
+split_channels:
+  h5_path: "/mnt/bulk-neptune/laura/multiplex/STAMP/multiplex-notebooks_qtif/temp/1"
+  # Subset of marker names to extract. Set to null (or remove) to extract all markers.
+  markers_to_extract:
+    - "HER2"
+  patch_size: 32    # must be divisible by 16
+  batch_size: 1024
+  num_workers: 8
+
+# --- Multi-channel mode ---
+# One H5 file per patient: {patient_stem}.h5
+# Stores patch_embeddings, marker_embeddings, token_embeddings, coord_x, coord_y
+multi_channels:
+  h5_path: "/mnt/bulk-neptune/laura/multiplex/feature_qtif/features_Tumorpanel_WSI"
+  # Set to null (or remove) to use all markers defined above
+  markers_to_extract: null
+  patch_size: 32    # must be divisible by 16
+  batch_size: 1024
+  num_workers: 8

@@ -1,0 +1,53 @@
+[project]
+name = "multiplex"
+version = "0.1.0"
+description = "Standalone KRONOS feature extraction for multiplexed QPTIFF slides"
+requires-python = ">=3.13,<3.14"
+
+dependencies = [
+    "torch~=2.10.0",
+    "torchvision~=0.25.0",
+    "h5py>=3.10",
+    "huggingface-hub>=0.26",
+    "imagecodecs>=2024.1.1",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "tifffile>=2024.1.1",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Optional faster attention (install separately after torch)
+xformers = [
+    "xformers",
+]
+# Training pipeline via STAMP CLI (train_qtif.py)
+training = [
+    "stamp @ {root:uri}/..",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+include = ["kronos.py"]
+
+[tool.uv]
+build-constraint-dependencies = [
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
