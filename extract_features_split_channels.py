@@ -52,6 +52,45 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _load_metadata_stats(cfg_path: str) -> dict[str, tuple[float, float]]:
+    """Load marker mean/std from marker_metadata.csv next to the config. Keys are lowercase."""
+    csv_path = Path(cfg_path).parent / "marker_metadata.csv"
+    if not csv_path.exists():
+        return {}
+    stats: dict[str, tuple[float, float]] = {}
+    with open(csv_path) as f:
+        reader = __import__("csv").DictReader(f)
+        for row in reader:
+            name = row["marker_name"].strip().lower()
+            try:
+                stats[name] = (float(row["marker_mean"]), float(row["marker_std"]))
+            except (ValueError, KeyError):
+                pass
+    return stats
+
+
+def _resolve_marker_stats(
+    markers: list[dict], cfg_path: str
+) -> tuple[list[float | None], list[float | None]]:
+    """Fill missing mean/std from marker_metadata.csv (case-insensitive). Leave None if not found."""
+    metadata = _load_metadata_stats(cfg_path)
+    means, stds = [], []
+    for m in markers:
+        mean, std = m.get("mean"), m.get("std")
+        if mean is None or std is None:
+            key = m["name"].strip().lower()
+            if key in metadata:
+                csv_mean, csv_std = metadata[key]
+                mean = mean if mean is not None else csv_mean
+                std = std if std is not None else csv_std
+                print(f"  {m['name']}: loaded stats from marker_metadata.csv (mean={mean:.4f}, std={std:.4f})")
+            else:
+                print(f"  {m['name']}: no stats found — skipping normalization")
+        means.append(mean)
+        stds.append(std)
+    return means, stds
+
+
 def build_config(cfg_path: str) -> dict:
     with open(cfg_path) as f:
         raw = yaml.safe_load(f)
@@ -61,11 +100,14 @@ def build_config(cfg_path: str) -> dict:
 
     markers_to_extract = mode.get("markers_to_extract")
     if markers_to_extract:
-        markers = [m for m in all_markers if m["name"] in markers_to_extract]
+        markers_to_extract_lower = [m.lower() for m in markers_to_extract]
+        markers = [m for m in all_markers if m["name"].lower() in markers_to_extract_lower]
         if not markers:
             raise ValueError(f"markers_to_extract {markers_to_extract} matched none of {[m['name'] for m in all_markers]}")
     else:
         markers = all_markers
+
+    means, stds = _resolve_marker_stats(markers, cfg_path)
 
     return {
         "multiplex_image_path": raw["multiplex_image_path"],
@@ -77,8 +119,8 @@ def build_config(cfg_path: str) -> dict:
         "model_type": raw["model"].get("model_type", "vits16"),
         "token_overlap": raw["model"].get("token_overlap", False),
         "marker_order": [m["name"] for m in markers],
-        "marker_means": [m["mean"] for m in markers],
-        "marker_stds": [m["std"] for m in markers],
+        "marker_means": means,
+        "marker_stds": stds,
         "patch_size": mode.get("patch_size", 64),
         "batch_size": mode.get("batch_size", 1),
         "num_workers": mode.get("num_workers", 0),
@@ -257,17 +299,18 @@ if __name__ == "__main__":
     n_gpus = torch.cuda.device_count()
     if n_gpus > 1 and args.device is None and args.markers is None:
         all_markers = config["marker_order"]
+        # If fewer markers than GPUs, distribute by marker; otherwise round-robin
         chunks = [all_markers[i::n_gpus] for i in range(n_gpus)]
         print(f"Launching {n_gpus} parallel workers across GPUs:")
         procs = []
         for gpu_idx, chunk in enumerate(chunks):
             if not chunk:
                 continue
-            print(f"  cuda:{gpu_idx} → {chunk}")
+            print(f"  cuda:{gpu_idx} ({torch.cuda.get_device_name(gpu_idx)}) → markers {chunk}")
             cmd = [
                 sys.executable, __file__,
                 "--config", args.config,
-                "--device", f"cuda:{gpu_idx}",
+                "--device", "cuda:0",
                 "--markers", *chunk,
             ]
             env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_idx)}

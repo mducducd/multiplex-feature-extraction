@@ -1,8 +1,8 @@
-# multiplex
+# Multiplex images feature extraction
 
 Standalone feature extraction pipeline for multiplexed slide images using the
 [KRONOS](https://github.com/mahmoodlab/KRONOS) Vision Transformer.
-Supports `.qptiff`, `.tiff`, `.tif` input. No STAMP installation required for extraction.
+Supports `.qptiff`, `.tiff`, `.tif` input.
 
 ## Overview
 
@@ -121,7 +121,6 @@ Where `N` = number of patches, `T` = `patch_size // 16`, `embed_dim` = 384 (vits
 ### Install
 
 ```bash
-cd STAMP/multiplex-notebooks_qtif
 uv sync
 source .venv/bin/activate
 ```
@@ -145,7 +144,7 @@ model:
   checkpoint_path: "hf_hub:MahmoodLab/kronos"
   hf_auth_token: "hf_..."           # HuggingFace token — get one at https://huggingface.co/MahmoodLab/KRONOS
   cache_dir: "./model_assets"        # local model cache
-  model_type: "vits16"               # "vits16" (embed_dim=384) or "vitl16" (embed_dim=1024)
+  model_type: "vits16"               # "vits16" (embed_dim=384) or "vitl16" (embed_dim=1024) currently only vits16 is available
   token_overlap: false               # true → stride 8 (denser, slower)
 
 markers:
@@ -169,10 +168,6 @@ multi_channels:
   num_workers: 8
 ```
 
-`patch_size` guidance:
-- `vits16` → 32 or 64 px
-- `vitl16` → 256 px (trained at this resolution)
-
 ---
 
 ## Usage
@@ -185,19 +180,19 @@ Writes one H5 per `(patient, marker)` pair — ideal for per-marker MIL:
 python extract_features_split_channels.py --config multiplex_config.yaml
 ```
 
-- Auto-detects all available GPUs and splits markers across them in parallel
+- **Multi-GPU**: automatically detected — markers are distributed round-robin across all GPUs, one subprocess per GPU. No flags needed.
 - Skips any `(patient, marker)` pair whose H5 already exists — safe to re-run
-- Progress bar shows elapsed, remaining, ETA total, patches/s, and current slide:
+- Progress bar shows elapsed, remaining, ETA total, patches/s, and current file:
   ```
   Progress:  12%|█▏  | 6/50 files [00:42<05:01, patches/s=312, ETA total=0:05:43, current=E-21-1234_HER2]
   ```
 
 Override GPU or markers from the command line:
 ```bash
-# run on a specific GPU
+# force a specific GPU (disables auto-parallel)
 python extract_features_split_channels.py --config multiplex_config.yaml --device cuda:1
 
-# extract only specific markers
+# extract only specific markers (disables auto-parallel)
 python extract_features_split_channels.py --config multiplex_config.yaml --markers HER2 DAPI
 ```
 
@@ -209,9 +204,19 @@ Writes one H5 per patient with all marker embeddings:
 python extract_features_multi_channels.py --config multiplex_config.yaml
 ```
 
+- **Multi-GPU**: automatically detected — slides are split evenly across all GPUs, one subprocess per GPU. No flags needed.
 - Skips slides whose H5 already exists — safe to re-run
 - Channels without `mean`/`std` in the config are passed through without normalization
 - Images with more channels than defined markers are sliced to match; images with fewer are skipped
+
+Override GPU or slide range from the command line:
+```bash
+# force a specific GPU (disables auto-parallel)
+python extract_features_multi_channels.py --config multiplex_config.yaml --device cuda:0
+
+# process a specific slice of slides (used internally by the parallel launcher)
+python extract_features_multi_channels.py --config multiplex_config.yaml --device cuda:0 --slide-start 0 --slide-end 10
+```
 
 ### Quick test run (subset of slides)
 
@@ -236,46 +241,7 @@ Options:
 
 ## Training (optional)
 
-`train_qtif.py` wraps the [STAMP](https://github.com/KatherLab/STAMP) CLI for
-cross-validation, statistics, and heatmaps. It requires STAMP to be installed
-(either in this venv via `uv sync --extra training`, or separately):
-
-```bash
-# Cross-validation
-python train_qtif.py crossval \
-    --output-dir /path/to/experiments/my_run \
-    --feature-dir /path/to/h5_features \
-    --clini-table  /path/to/clinical.xlsx \
-    --slide-table  /path/to/slide.csv \
-    --ground-truth-label TTF1
-
-# Statistics on completed cross-val
-python train_qtif.py statistics \
-    --output-dir /path/to/experiments/my_run
-
-# Full pipeline (crossval → statistics)
-python train_qtif.py full \
-    --output-dir /path/to/experiments/my_run \
-    --feature-dir /path/to/h5_features
-```
-
----
-
-## File overview
-
-```
-multiplex-notebooks_qtif/
-├── kronos.py                          # KRONOS ViT model (self-contained copy)
-├── extract_features_split_channels.py # Split-channel feature extraction
-├── extract_features_multi_channels.py # Multi-channel feature extraction
-├── run_split_channels_test.py         # Test run on a slide subset
-├── train_qtif.py                      # Training pipeline wrapper (requires STAMP)
-├── multiplex_config.yaml              # Config: Tumorpanel, vitl16
-├── multiplex_config_tumorpanel_ML.yaml # Config: Tumorpanel, vits16
-├── multiplex_config_Immunpanel_ML.yaml # Config: Immunpanel, vits16
-├── pyproject.toml                     # Project dependencies (uv)
-└── README.md
-```
+After we have extracted feaure we can use [STAMP](https://github.com/KatherLab/STAMP) CLI for training, cross-validation, statistics, and heatmaps. It requires STAMP to be installed
 
 ---
 

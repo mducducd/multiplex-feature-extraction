@@ -17,7 +17,10 @@ Usage:
 """
 
 import argparse
+import os
 import random
+import subprocess
+import sys
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -50,7 +53,49 @@ def _stem(path: Path) -> str:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-channel KRONOS feature extraction")
     p.add_argument("--config", default="multiplex_config.yaml", help="Path to multiplex_config.yaml")
+    p.add_argument("--device", default=None, help="Override config device (e.g. cuda:0)")
+    p.add_argument("--slide-start", type=int, default=None, help="Start index for slide subset (used by parallel launcher)")
+    p.add_argument("--slide-end", type=int, default=None, help="End index for slide subset (used by parallel launcher)")
     return p.parse_args()
+
+
+def _load_metadata_stats(cfg_path: str) -> dict[str, tuple[float, float]]:
+    """Load marker mean/std from marker_metadata.csv next to the config. Keys are lowercase."""
+    csv_path = Path(cfg_path).parent / "marker_metadata.csv"
+    if not csv_path.exists():
+        return {}
+    stats: dict[str, tuple[float, float]] = {}
+    with open(csv_path) as f:
+        reader = __import__("csv").DictReader(f)
+        for row in reader:
+            name = row["marker_name"].strip().lower()
+            try:
+                stats[name] = (float(row["marker_mean"]), float(row["marker_std"]))
+            except (ValueError, KeyError):
+                pass
+    return stats
+
+
+def _resolve_marker_stats(
+    markers: list[dict], cfg_path: str
+) -> tuple[list[float | None], list[float | None]]:
+    """Fill missing mean/std from marker_metadata.csv (case-insensitive). Leave None if not found."""
+    metadata = _load_metadata_stats(cfg_path)
+    means, stds = [], []
+    for m in markers:
+        mean, std = m.get("mean"), m.get("std")
+        if mean is None or std is None:
+            key = m["name"].strip().lower()
+            if key in metadata:
+                csv_mean, csv_std = metadata[key]
+                mean = mean if mean is not None else csv_mean
+                std = std if std is not None else csv_std
+                print(f"  {m['name']}: loaded stats from marker_metadata.csv (mean={mean:.4f}, std={std:.4f})")
+            else:
+                print(f"  {m['name']}: no stats found — skipping normalization")
+        means.append(mean)
+        stds.append(std)
+    return means, stds
 
 
 def build_config(cfg_path: str) -> dict:
@@ -62,11 +107,14 @@ def build_config(cfg_path: str) -> dict:
 
     markers_to_extract = mode.get("markers_to_extract")
     if markers_to_extract:
-        markers = [m for m in all_markers if m["name"] in markers_to_extract]
+        markers_to_extract_lower = [m.lower() for m in markers_to_extract]
+        markers = [m for m in all_markers if m["name"].lower() in markers_to_extract_lower]
         if not markers:
             raise ValueError(f"markers_to_extract {markers_to_extract} matched none of {[m['name'] for m in all_markers]}")
     else:
         markers = all_markers
+
+    means, stds = _resolve_marker_stats(markers, cfg_path)
 
     return {
         "multiplex_image_path": raw["multiplex_image_path"],
@@ -78,11 +126,11 @@ def build_config(cfg_path: str) -> dict:
         "model_type": raw["model"].get("model_type", "vits16"),
         "token_overlap": raw["model"].get("token_overlap", False),
         "marker_order": [m["name"] for m in markers],
-        "marker_means": [m["mean"] for m in markers],
-        "marker_stds": [m["std"] for m in markers],
+        "marker_means": means,
+        "marker_stds": stds,
         "patch_size": mode.get("patch_size", 32),
         "batch_size": mode.get("batch_size", 1),
-        "num_workers": mode.get("num_workers", 0),
+        "num_workers": mode.get("num_workers", 0),  # 0 = main process; >0 risks OOM on large slides
     }
 
 
@@ -94,7 +142,7 @@ class MultiChannelDataset(IterableDataset):
     Skips patients whose H5 already exists.
     """
 
-    def __init__(self, config: dict, shuffle: bool = False):
+    def __init__(self, config: dict, shuffle: bool = False, slide_start: int = None, slide_end: int = None):
         self.h5_path = Path(config["h5_path"])
         self.patch_size = config["patch_size"]
         self.marker_order = config["marker_order"]
@@ -117,6 +165,9 @@ class MultiChannelDataset(IterableDataset):
         for slide in all_slides:
             if not (self.h5_path / f"{_stem(slide)}.h5").exists():
                 self.file_paths.append(slide)
+
+        if slide_start is not None or slide_end is not None:
+            self.file_paths = self.file_paths[slide_start:slide_end]
 
         print(f"Found {len(all_slides)} slide files → {len(self.file_paths)} to process")
 
@@ -151,13 +202,13 @@ class MultiChannelDataset(IterableDataset):
                     yield patch, x, y, patient_stem
 
 
-def run(config: dict) -> None:
+def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
     assert config["patch_size"] % 16 == 0, "patch_size must be divisible by 16"
 
     out_dir = Path(config["h5_path"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = MultiChannelDataset(config)
+    dataset = MultiChannelDataset(config, slide_start=slide_start, slide_end=slide_end)
     if not dataset.file_paths:
         print("Nothing to process — all H5 files already exist.")
         return
@@ -198,16 +249,26 @@ def run(config: dict) -> None:
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} files "
                             "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
 
+    skip_fnames: set = set()
+
     try:
         for batch, coord_x, coord_y, fname in dataloader:
             fname = fname[0]
             coord_x = coord_x.numpy()
             coord_y = coord_y.numpy()
 
+            if fname in skip_fnames:
+                continue
+
             if fname not in h5_files:
                 pbar.update(1)
                 active_fname = fname
-                hf = h5py.File(out_dir / f"{fname}.h5", "w")
+                try:
+                    hf = h5py.File(out_dir / f"{fname}.h5", "w")
+                except BlockingIOError:
+                    tqdm.write(f"Skipping {fname} — H5 locked by another process")
+                    skip_fnames.add(fname)
+                    continue
                 hf.attrs["marker_names"] = config["marker_order"]
                 h5_files[fname] = {
                     "file": hf,
@@ -276,4 +337,38 @@ def run(config: dict) -> None:
 if __name__ == "__main__":
     args = parse_args()
     config = build_config(args.config)
-    run(config)
+
+    if args.device:
+        config["device"] = args.device
+
+    # Auto-parallel: split slides across all available GPUs
+    n_gpus = torch.cuda.device_count()
+    if n_gpus > 1 and args.device is None and args.slide_start is None:
+        # Discover total slides to process
+        probe = MultiChannelDataset(config)
+        total_slides = len(probe.file_paths)
+        if total_slides == 0:
+            print("Nothing to process — all H5 files already exist.")
+        else:
+            chunk = (total_slides + n_gpus - 1) // n_gpus
+            print(f"Launching {n_gpus} parallel workers across GPUs ({total_slides} slides):")
+            procs = []
+            for gpu_idx in range(n_gpus):
+                start = gpu_idx * chunk
+                end = min(start + chunk, total_slides)
+                if start >= total_slides:
+                    break
+                print(f"  cuda:{gpu_idx} ({torch.cuda.get_device_name(gpu_idx)}) → slides {start}–{end - 1}")
+                cmd = [
+                    sys.executable, __file__,
+                    "--config", args.config,
+                    "--device", "cuda:0",
+                    "--slide-start", str(start),
+                    "--slide-end", str(end),
+                ]
+                env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_idx)}
+                procs.append(subprocess.Popen(cmd, env=env))
+            for p in procs:
+                p.wait()
+    else:
+        run(config, slide_start=args.slide_start, slide_end=args.slide_end)

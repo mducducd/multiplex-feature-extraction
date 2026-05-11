@@ -16,6 +16,8 @@ model:
 
 # Markers listed in the order they appear as channels in the qptiff.
 # mean/std are per-channel normalization statistics.
+# Leave mean/std as null to auto-fetch from marker_metadata.csv (case-insensitive match).
+# If not found in the CSV either, the channel is passed through without normalization.
 markers:
   - name: "DAPI"
     mean: 36.490348930888
@@ -60,4 +62,4 @@ multi_channels:
   markers_to_extract: null
   patch_size: 64    # must be divisible by 16
   batch_size: 128
-  num_workers: 8
+  num_workers: 0
