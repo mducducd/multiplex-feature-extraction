@@ -1,8 +1,71 @@
-# Multiplex images feature extraction
+# Multiplex pathology images feature extraction
 
 Standalone feature extraction pipeline for multiplexed slide images using the
 [KRONOS](https://github.com/mahmoodlab/KRONOS) Vision Transformer.
 Supports `.qptiff`, `.tiff`, `.tif` input.
+
+## What is Multiplex Imaging?
+
+**Multiplex imaging** (or **multiplexed imaging**) is a advanced tissue analysis technique that captures **multiple protein markers simultaneously** from a single tissue sample. Each marker is detected in a separate channel, allowing researchers to study the spatial relationships and co-localization patterns of different proteins in tissue.
+
+### Key Concepts
+
+```
+Traditional Histology          Multiplex Imaging
+(Single Channel)               (Multi-Channel)
+
+       Slide                          Slide
+         │                              │
+    Protein A                      Protein A (Channel 1)
+      only                         Protein B (Channel 2)
+                                   Protein C (Channel 3)
+                                   Protein D (Channel 4)
+                                   DAPI nuclei (Channel 5)
+                                        │
+                                    One file with
+                                   multiple layers
+```
+
+### Example Marker Panels
+
+**Breast Cancer Immune Profiling:**
+```
+DAPI (nuclei) → HER2 (tumor) → CD3 (T cells) → CD8 (cytotoxic) → FOXP3 (regulatory)
+  └─ Reveals tumor infiltration and immune landscape
+```
+
+**Colorectal Cancer T Cell Assessment:**
+```
+DAPI (nuclei) → PanCK (epithelium) → CD3 (T cells) → CD8 (cytotoxic) → CD4 (helper)
+  └─ Maps immune cell types relative to tumor boundaries
+```
+
+**Multiplex Immune Phenotyping (6+ markers):**
+```
+DAPI → CD3 → CD8 → CD4 → FOXP3 → CD20 → Ki67
+  └─ Complete immune ecosystem: T cells, B cells, activation status, suppression
+```
+
+### Workflow Overview
+
+```
+Multi-channel TIFF/QPTIFF file
+(raw tissue stain data)
+         │
+         ├─ Channel 1 (DAPI) ─┐
+         ├─ Channel 2 (HER2) ──┤
+         ├─ Channel 3 (PanCK)──┼──→ KRONOS ViT Feature Extraction
+         ├─ Channel 4 (CD8) ───┤
+         └─ Channel 5 (FOXP3)─┘
+                                    │
+                                    ↓
+                        High-dimensional 
+                        embedding vectors
+                        (N patches × 384/1024 dims)
+                                    │
+                                    ↓
+                        H5 files (for downstream ML/stats)
+```
 
 ## Overview
 
@@ -23,6 +86,48 @@ Two extraction modes are supported:
 |------|--------|--------------------|
 | **Split-channel** | `extract_features_split_channels.py` | One H5 per `(patient, marker)` |
 | **Multi-channel** | `extract_features_multi_channels.py` | One H5 per patient (all markers) |
+
+### Extraction Modes Explained
+
+#### Split-Channel Mode
+Extracts features **per marker separately** — useful for per-marker machine learning:
+```
+Input:  patient_001.qptiff (5 channels: DAPI, HER2, PanCK, CD8, FOXP3)
+                     │
+        ┌────────────┼────────────┬──────────────┬──────────────┐
+        ↓            ↓            ↓              ↓              ↓
+    DAPI only    HER2 only    PanCK only    CD8 only      FOXP3 only
+    ViT encoder  ViT encoder  ViT encoder  ViT encoder   ViT encoder
+        │            │            │              │              │
+        ↓            ↓            ↓              ↓              ↓
+Output: patient_001_DAPI.h5, patient_001_HER2.h5, ... (one file per marker)
+```
+
+**Best for**: Per-marker analysis, training separate models per biomarker, comparing marker distributions
+
+#### Multi-Channel Mode
+Extracts features **using all markers jointly** — preserves multi-marker context:
+```
+Input:  patient_001.qptiff (5 channels: DAPI, HER2, PanCK, CD8, FOXP3)
+                     │
+                  Combined input
+                (all 5 channels together)
+                     │
+                ViT encoder
+                (single pass)
+                     │
+    ┌────────────────┼────────────────┐
+    ↓                ↓                 ↓
+CLS embedding   Marker embeddings  Token embeddings
+(global)        (per-marker)       (spatial tokens)
+    │                │                 │
+    └────────────────┼─────────────────┘
+                     ↓
+            patient_001.h5 (multi-channel)
+            Contains all features from one pass
+```
+
+**Best for**: Multi-marker analysis, learning joint representations, spatial relationships between markers
 
 ### H5 contents
 
@@ -165,10 +270,10 @@ multi_channels:
   markers_to_extract: null           # null = all markers
   patch_size: 64
   batch_size: 128
-  num_workers: 0    # ⚠️  keep 0 — each worker loads the full slide into RAM
+  num_workers: 0   
 ```
 
-**⚠️ Important**: `num_workers` must be `0` for **multi-channel mode**. Each worker loads the entire slide into memory to yield patches — setting `num_workers > 0` causes out-of-memory errors. For split-channel mode, `num_workers > 0` is safe.
+**⚠️ Important**: `num_workers` should be `0` for **multi-channel mode**. Each worker loads the entire slide into memory to yield patches — setting `num_workers > 0` causes out-of-memory errors. For split-channel mode, `num_workers > 0` is safe.
 
 ---
 
@@ -210,7 +315,6 @@ python extract_features_multi_channels.py --config multiplex_config.yaml
 - Skips slides whose H5 already exists — safe to re-run
 - Channels without `mean`/`std` in the config are passed through without normalization
 - Images with more channels than defined markers are sliced to match; images with fewer are skipped
-- **`num_workers` should be 0** in the config — each worker loads the full slide into RAM; `num_workers > 0` can be used for split-channel mode.
 
 Override GPU or slide range from the command line:
 ```bash
@@ -245,6 +349,39 @@ Options:
 ## Training (optional)
 
 After we have extracted feaure we can use [STAMP](https://github.com/KatherLab/STAMP) CLI for training, cross-validation, statistics, and heatmaps. It requires STAMP to be installed
+
+---
+
+## Visual Examples & Real Data
+
+### Real Workflow & Channel Images
+
+**Multiplex Immunofluorescence Algorithm Workflow:**
+![Algorithm Workflow](https://cdn.ncbi.nlm.nih.gov/pmc/blobs/4911/9271766/262603756c8e/fonc-12-889886-g006.jpg)
+
+**Multi-Channel Separation Example (Activation Panel):**
+![Channel Separation](https://cdn.ncbi.nlm.nih.gov/pmc/blobs/4911/9271766/1486322af81c/fonc-12-889886-g001.jpg)
+
+**Image Preparation & Tissue Segmentation:**
+![Image Prep](https://cdn.ncbi.nlm.nih.gov/pmc/blobs/4911/9271766/ab1f3d8d7b62/fonc-12-889886-g003.jpg)
+
+### Research Publications
+
+These publications contain additional real multiplex tissue images, visualizations, and datasets:
+
+- **[CyCIF Method Overview](https://www.tissue-atlas.org/cycif-method)** — Harvard Tissue Atlas with interactive visualizations of cyclic immunofluorescence imaging
+- **[Nature Cancer - High-plex imaging biomarkers](https://www.nature.com/articles/s43018-023-00576-1)** — Side-by-side traditional and multiplex histology with HER2, immune markers
+- **[Nature Methods - 3D multiplexed profiling (2025)](https://www.nature.com/articles/s41592-025-02824-x)** — Latest high-multiplex 3D imaging techniques
+- **[npj Breast Cancer - HER2 multiplexed imaging](https://www.nature.com/articles/s41523-023-00605-3)** — Multiplex detection of HER2 patterns with DAPI, CD8, CD20 panels
+- **[eLife - t-CyCIF imaging techniques](https://elifesciences.org/articles/31657)** — Highly multiplexed immunofluorescence with conventional microscopes
+- **[Scientific Data - Immune markers dataset](https://www.nature.com/articles/s41597-019-0332-y)** — Multiplexed images + single-cell data of tonsil and lung cancer
+- **[CIO DFCI - Multiplex IF Technology](https://ciopath.dfci.harvard.edu/technology-platforms/multiplex-immunofluorescence)** — Harvard facility with example workflows
+
+### KRONOS Foundation Model
+
+- **[KRONOS GitHub](https://github.com/mahmoodlab/KRONOS)** — Vision Transformer trained on 47M patches spanning 175 protein markers
+- **[KRONOS on HuggingFace](https://huggingface.co/MahmoodLab/KRONOS)** — Pretrained weights (requires registration)
+- **[KRONOS Paper](https://arxiv.org/html/2506.03373v1)** — Foundation Model for Spatial Proteomics
 
 ---
 
