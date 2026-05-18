@@ -307,6 +307,7 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
     active_fname = None
     patches_done = 0
     t_start = time.time()
+    run_successful = False
 
     pbar = tqdm(total=total, desc="Progress", unit="file",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} files "
@@ -316,82 +317,95 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
 
     try:
         for batch, coord_x, coord_y, fname in dataloader:
-            fname = fname[0]
-            coord_x = coord_x.numpy()
-            coord_y = coord_y.numpy()
-
-            if fname in skip_fnames:
-                continue
-
-            if fname not in h5_files:
-                pbar.update(1)
-                active_fname = fname
-                try:
-                    hf = h5py.File(out_dir / f"{fname}.h5", "w")
-                except BlockingIOError:
-                    tqdm.write(f"Skipping {fname} — H5 locked by another process")
-                    skip_fnames.add(fname)
-                    continue
-                hf.attrs["marker_names"] = config["marker_order"]
-                h5_files[fname] = {
-                    "file": hf,
-                    "patch_ds": hf.create_dataset(
-                        "feats",
-                        shape=(0, embed_dim),
-                        maxshape=(None, embed_dim),
-                        dtype="f",
-                    ),
-                    "marker_ds": hf.create_dataset(
-                        "marker_embeddings",
-                        shape=(0, num_markers, embed_dim),
-                        maxshape=(None, num_markers, embed_dim),
-                        dtype="f",
-                    ),
-                    "token_ds": hf.create_dataset(
-                        "token_embeddings",
-                        shape=(0, num_markers, tokens_per_side, tokens_per_side, embed_dim),
-                        maxshape=(None, num_markers, tokens_per_side, tokens_per_side, embed_dim),
-                        dtype="f",
-                    ),
-                    "coord_x_ds": hf.create_dataset("coord_x", shape=(0,), maxshape=(None,), dtype="i"),
-                    "coord_y_ds": hf.create_dataset("coord_y", shape=(0,), maxshape=(None,), dtype="i"),
-                }
-                file_count += 1
-
             with torch.no_grad():
                 patch_emb, marker_emb, token_emb = model(batch.to(device))
-
-            if not torch.isfinite(patch_emb).all():
-                tqdm.write(f"NaN — skipping {fname} at ({coord_x}, {coord_y})")
-                continue
 
             patch_np = patch_emb.cpu().numpy()
             marker_np = marker_emb.cpu().numpy()
             token_np = token_emb.cpu().numpy()
+            cx_np = coord_x.numpy()
+            cy_np = coord_y.numpy()
 
-            entry = h5_files[fname]
-            n = entry["patch_ds"].shape[0]
-            end = n + patch_np.shape[0]
+            for i, sample_fname in enumerate(fname):
+                if sample_fname in skip_fnames:
+                    continue
 
-            for key in ("patch_ds", "marker_ds", "token_ds", "coord_x_ds", "coord_y_ds"):
-                entry[key].resize(end, axis=0)
+                if not torch.isfinite(patch_emb[i]).all():
+                    tqdm.write(f"NaN — skipping {sample_fname} at ({cx_np[i]}, {cy_np[i]})")
+                    continue
 
-            entry["patch_ds"][n:end] = patch_np
-            entry["marker_ds"][n:end] = marker_np
-            entry["token_ds"][n:end] = token_np
-            entry["coord_x_ds"][n:end] = [coord_x]
-            entry["coord_y_ds"][n:end] = [coord_y]
+                if sample_fname not in h5_files:
+                    pbar.update(1)
+                    active_fname = sample_fname
+                    final_path = out_dir / f"{sample_fname}.h5"
+                    tmp_path = out_dir / f".{sample_fname}.h5.partial"
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                    try:
+                        hf = h5py.File(tmp_path, "w")
+                    except BlockingIOError:
+                        tqdm.write(f"Skipping {sample_fname} — H5 locked by another process")
+                        skip_fnames.add(sample_fname)
+                        continue
+                    hf.attrs["marker_names"] = config["marker_order"]
+                    patch_ds = hf.create_dataset(
+                        "feats",
+                        shape=(0, embed_dim),
+                        maxshape=(None, embed_dim),
+                        dtype="f",
+                    )
+                    # Backward-compatible alias expected by some STAMP loading paths.
+                    hf["patch_embeddings"] = patch_ds
+                    h5_files[sample_fname] = {
+                        "tmp_path": tmp_path,
+                        "final_path": final_path,
+                        "file": hf,
+                        "patch_ds": patch_ds,
+                        "marker_ds": hf.create_dataset(
+                            "marker_embeddings",
+                            shape=(0, num_markers, embed_dim),
+                            maxshape=(None, num_markers, embed_dim),
+                            dtype="f",
+                        ),
+                        "token_ds": hf.create_dataset(
+                            "token_embeddings",
+                            shape=(0, num_markers, tokens_per_side, tokens_per_side, embed_dim),
+                            maxshape=(None, num_markers, tokens_per_side, tokens_per_side, embed_dim),
+                            dtype="f",
+                        ),
+                        "coord_x_ds": hf.create_dataset("coord_x", shape=(0,), maxshape=(None,), dtype="i"),
+                        "coord_y_ds": hf.create_dataset("coord_y", shape=(0,), maxshape=(None,), dtype="i"),
+                    }
+                    file_count += 1
 
-            patches_done += patch_np.shape[0]
+                entry = h5_files[sample_fname]
+                n = entry["patch_ds"].shape[0]
+                end = n + 1
+
+                for key in ("patch_ds", "marker_ds", "token_ds", "coord_x_ds", "coord_y_ds"):
+                    entry[key].resize(end, axis=0)
+
+                entry["patch_ds"][n] = patch_np[i]
+                entry["marker_ds"][n] = marker_np[i]
+                entry["token_ds"][n] = token_np[i]
+                entry["coord_x_ds"][n] = cx_np[i]
+                entry["coord_y_ds"][n] = cy_np[i]
+
+                patches_done += 1
             elapsed = time.time() - t_start
             patch_rate = patches_done / elapsed if elapsed > 0 else 0
             eta_total = str(timedelta(seconds=int(elapsed / pbar.n * total))) if pbar.n > 0 else "?"
-            pbar.set_postfix({"patches/s": f"{patch_rate:.0f}", "ETA total": eta_total, "current": fname}, refresh=False)
+            pbar.set_postfix({"patches/s": f"{patch_rate:.0f}", "ETA total": eta_total, "current": active_fname}, refresh=False)
+
+        run_successful = True
 
     finally:
         pbar.close()
         for entry in h5_files.values():
             entry["file"].close()
+        if run_successful:
+            for entry in h5_files.values():
+                os.replace(entry["tmp_path"], entry["final_path"])
 
     elapsed_total = timedelta(seconds=int(time.time() - t_start))
     print(f"\nDone. {len(h5_files)} H5 files written to {out_dir} in {elapsed_total}")

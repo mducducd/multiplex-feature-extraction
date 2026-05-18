@@ -287,6 +287,7 @@ def run(config: dict) -> None:
     active_fname = None
     patches_done = 0
     t_start = time.time()
+    run_successful = False
 
     pbar = tqdm(total=total, desc="Progress", unit="file",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} files "
@@ -309,11 +310,21 @@ def run(config: dict) -> None:
                 if fname not in h5_files:
                     pbar.update(1)
                     active_fname = fname
-                    hf = h5py.File(out_dir / f"{fname}.h5", "w")
+                    final_path = out_dir / f"{fname}.h5"
+                    tmp_path = out_dir / f".{fname}.h5.partial"
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+
+                    hf = h5py.File(tmp_path, "w")
                     hf.attrs["marker_names"] = fname.split("_")[-1]
+                    patch_ds = hf.create_dataset("feats", shape=(0, embed_dim), maxshape=(None, embed_dim), dtype="f")
+                    # Backward-compatible alias expected by some STAMP loading paths.
+                    hf["patch_embeddings"] = patch_ds
                     h5_files[fname] = {
+                        "tmp_path": tmp_path,
+                        "final_path": final_path,
                         "file": hf,
-                        "patch_ds": hf.create_dataset("feats", shape=(0, embed_dim), maxshape=(None, embed_dim), dtype="f"),
+                        "patch_ds": patch_ds,
                         "coord_x_ds": hf.create_dataset("coord_x", shape=(0,), maxshape=(None,), dtype="i"),
                         "coord_y_ds": hf.create_dataset("coord_y", shape=(0,), maxshape=(None,), dtype="i"),
                     }
@@ -334,10 +345,15 @@ def run(config: dict) -> None:
             eta_total = str(timedelta(seconds=int(elapsed / pbar.n * total))) if pbar.n > 0 else "?"
             pbar.set_postfix({"patches/s": f"{patch_rate:.0f}", "ETA total": eta_total, "current": active_fname}, refresh=False)
 
+        run_successful = True
+
     finally:
         pbar.close()
         for entry in h5_files.values():
             entry["file"].close()
+        if run_successful:
+            for entry in h5_files.values():
+                os.replace(entry["tmp_path"], entry["final_path"])
 
     elapsed_total = timedelta(seconds=int(time.time() - t_start))
     print(f"\nDone. {len(h5_files)} H5 files written to {out_dir} in {elapsed_total}")
