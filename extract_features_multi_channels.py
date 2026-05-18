@@ -2,7 +2,7 @@
 """
 Multi-channel feature extraction using KRONOS embeddings.
 
-Processes *.qptiff files and writes one H5 per patient:
+Processes slide files (*.qptiff, *.tiff, *.tif) and writes one H5 per patient:
   {h5_path}/{patient_stem}.h5
 
 Each H5 contains:
@@ -42,12 +42,41 @@ from kronos import create_model_from_pretrained
 
 
 def _stem(path: Path) -> str:
-    """Return patient stem, stripping .unmixed.qptiff, .tiff, or .tif."""
+    """Return patient stem, stripping .qptiff/.tiff/.tif suffixes."""
     name = path.name
+    name_lower = name.lower()
     for ext in (".qptiff", ".tiff", ".tif"):
-        if name.endswith(ext):
+        if name_lower.endswith(ext):
             return name[: -len(ext)]
     return path.stem
+
+
+def _discover_slide_files(root: Path) -> list[Path]:
+    """
+    Auto-detect slide files and deduplicate by patient stem.
+
+    If multiple extensions exist for the same stem, keep the highest-priority
+    file: .qptiff > .tiff > .tif.
+    """
+    ext_priority = {".qptiff": 0, ".tiff": 1, ".tif": 2}
+    chosen: dict[str, tuple[int, Path]] = {}
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part.startswith(".") for part in path.parts):
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in ext_priority:
+            continue
+
+        stem = _stem(path)
+        prio = ext_priority[suffix]
+        prev = chosen.get(stem)
+        if prev is None or prio < prev[0]:
+            chosen[stem] = (prio, path)
+
+    return sorted(item[1] for item in chosen.values())
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,28 +88,69 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _load_metadata_stats(cfg_path: str) -> dict[str, tuple[float, float]]:
-    """Load marker mean/std from marker_metadata.csv next to the config. Keys are lowercase."""
-    csv_path = Path(cfg_path).parent / "marker_metadata.csv"
-    if not csv_path.exists():
-        return {}
-    stats: dict[str, tuple[float, float]] = {}
-    with open(csv_path) as f:
-        reader = __import__("csv").DictReader(f)
-        for row in reader:
-            name = row["marker_name"].strip().lower()
-            try:
-                stats[name] = (float(row["marker_mean"]), float(row["marker_std"]))
-            except (ValueError, KeyError):
-                pass
-    return stats
+def _metadata_csv_candidates(cfg_path: str, raw_cfg: dict | None = None) -> list[Path]:
+    """Return candidate marker metadata CSV paths, in lookup priority order."""
+    cfg_dir = Path(cfg_path).resolve().parent
+    script_dir = Path(__file__).resolve().parent
+    candidates: list[Path] = []
+
+    configured_path = (raw_cfg or {}).get("marker_metadata_csv")
+    if configured_path:
+        csv_path = Path(str(configured_path)).expanduser()
+        if not csv_path.is_absolute():
+            csv_path = (cfg_dir / csv_path).resolve()
+        candidates.append(csv_path)
+
+    candidates.extend(
+        [
+            cfg_dir / "marker_metadata.csv",
+            script_dir / "marker_metadata.csv",
+            Path.cwd() / "marker_metadata.csv",
+        ]
+    )
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _load_metadata_stats(cfg_path: str, raw_cfg: dict | None = None) -> dict[str, tuple[float, float]]:
+    """Load marker mean/std from marker_metadata.csv. Keys are lowercase marker names."""
+    for csv_path in _metadata_csv_candidates(cfg_path, raw_cfg):
+        if not csv_path.exists():
+            continue
+
+        stats: dict[str, tuple[float, float]] = {}
+        with open(csv_path, newline="") as f:
+            reader = __import__("csv").DictReader(f)
+            for row in reader:
+                try:
+                    name = row["marker_name"].strip().lower()
+                    stats[name] = (float(row["marker_mean"]), float(row["marker_std"]))
+                except (ValueError, KeyError, AttributeError):
+                    continue
+
+        if stats:
+            print(f"Loaded marker stats for {len(stats)} markers from {csv_path}")
+        else:
+            print(f"Found marker metadata file but parsed 0 valid rows: {csv_path}")
+        return stats
+
+    looked_in = ", ".join(str(p) for p in _metadata_csv_candidates(cfg_path, raw_cfg))
+    print(f"No marker_metadata.csv found. Looked in: {looked_in}")
+    return {}
 
 
 def _resolve_marker_stats(
-    markers: list[dict], cfg_path: str
+    markers: list[dict], cfg_path: str, raw_cfg: dict | None = None
 ) -> tuple[list[float | None], list[float | None]]:
     """Fill missing mean/std from marker_metadata.csv (case-insensitive). Leave None if not found."""
-    metadata = _load_metadata_stats(cfg_path)
+    metadata = _load_metadata_stats(cfg_path, raw_cfg)
     means, stds = [], []
     for m in markers:
         mean, std = m.get("mean"), m.get("std")
@@ -114,7 +184,7 @@ def build_config(cfg_path: str) -> dict:
     else:
         markers = all_markers
 
-    means, stds = _resolve_marker_stats(markers, cfg_path)
+    means, stds = _resolve_marker_stats(markers, cfg_path, raw)
 
     return {
         "multiplex_image_path": raw["multiplex_image_path"],
@@ -152,12 +222,7 @@ class MultiChannelDataset(IterableDataset):
         self.shuffle = shuffle
 
         root = Path(config["multiplex_image_path"])
-        all_slides = sorted(
-            f for f in {
-                *root.rglob("*.qptiff"),
-            }
-            if not any(part.startswith(".") for part in f.parts)
-        )
+        all_slides = _discover_slide_files(root)
 
         self.file_paths = []
         for slide in all_slides:

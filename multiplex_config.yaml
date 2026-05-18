@@ -4,6 +4,9 @@
 # Root directory containing *.qptiff files (searched recursively)
 multiplex_image_path: "/mnt/copernicus3/PATHOLOGY/others/private/IMPALUX/data/Vorversuche_2_WSI/Immunpanel_WSI"
 
+# Path to marker metadata CSV (relative to this config file)
+marker_metadata_csv: "marker_metadata.csv"
+
 # Device for inference ("cuda", "cuda:0", "cpu")
 device: "cuda"
 
