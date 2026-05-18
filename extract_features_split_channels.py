@@ -147,8 +147,6 @@ class SplitChannelDataset(IterableDataset):
         all_slides = sorted(
             f for f in {
                 *root.rglob("*.qptiff"),
-                *root.rglob("*.tiff"),
-                *root.rglob("*.tif"),
             }
             if not any(part.startswith(".") for part in f.parts)
         )
