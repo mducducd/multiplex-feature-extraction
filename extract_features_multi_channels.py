@@ -82,10 +82,25 @@ def _discover_slide_files(root: Path) -> list[Path]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-channel KRONOS feature extraction")
     p.add_argument("--config", default="multiplex_config.yaml", help="Path to multiplex_config.yaml")
-    p.add_argument("--device", default=None, help="Override config device (e.g. cuda:0)")
-    p.add_argument("--slide-start", type=int, default=None, help="Start index for slide subset (used by parallel launcher)")
-    p.add_argument("--slide-end", type=int, default=None, help="End index for slide subset (used by parallel launcher)")
+    p.add_argument(
+        "--device",
+        default=None,
+        help="GPU index like 0/1 or full torch device string like cuda:0/cpu",
+    )
+    p.add_argument("--parallel", action="store_true", help="Opt-in: split slides across all visible GPUs")
+    p.add_argument("--slide-index", type=int, default=0, help="Start slide index (default: 0)")
+    p.add_argument("--num-slides", type=int, default=1, help="How many slides to process from slide-index (default: 1)")
     return p.parse_args()
+
+
+def _normalize_device_arg(device_arg: str | None) -> str | None:
+    """Map simple GPU index args like '0'/'1' to torch devices."""
+    if device_arg is None:
+        return None
+    d = str(device_arg).strip()
+    if d.isdigit():
+        return f"cuda:{d}"
+    return d
 
 
 def _metadata_csv_candidates(cfg_path: str, raw_cfg: dict | None = None) -> list[Path]:
@@ -415,12 +430,16 @@ if __name__ == "__main__":
     args = parse_args()
     config = build_config(args.config)
 
-    if args.device:
-        config["device"] = args.device
+    normalized_device = _normalize_device_arg(args.device)
+    if normalized_device:
+        config["device"] = normalized_device
 
-    # Auto-parallel: split slides across all available GPUs
+    slide_start = args.slide_index
+    slide_end = args.slide_index + args.num_slides
+
+    # Parallel only when explicitly requested.
     n_gpus = torch.cuda.device_count()
-    if n_gpus > 1 and args.device is None and args.slide_start is None:
+    if args.parallel and n_gpus > 1:
         # Discover total slides to process
         probe = MultiChannelDataset(config)
         total_slides = len(probe.file_paths)
@@ -439,13 +458,13 @@ if __name__ == "__main__":
                 cmd = [
                     sys.executable, __file__,
                     "--config", args.config,
+                    "--slide-index", str(start),
+                    "--num-slides", str(end - start),
                     "--device", "cuda:0",
-                    "--slide-start", str(start),
-                    "--slide-end", str(end),
                 ]
                 env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_idx)}
                 procs.append(subprocess.Popen(cmd, env=env))
             for p in procs:
                 p.wait()
     else:
-        run(config, slide_start=args.slide_start, slide_end=args.slide_end)
+        run(config, slide_start=slide_start, slide_end=slide_end)

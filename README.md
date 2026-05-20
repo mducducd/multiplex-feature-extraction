@@ -287,20 +287,27 @@ Writes one H5 per `(patient, marker)` pair — ideal for per-marker MIL:
 python extract_features_split_channels.py --config multiplex_config.yaml
 ```
 
-- **Multi-GPU**: automatically detected — markers are distributed round-robin across all GPUs, one subprocess per GPU. No flags needed.
+- **Default**: one-by-one (`--slide-index 0 --num-slides 1`) on one process.
+- **Parallel**: opt-in with `--parallel` (markers distributed round-robin across GPUs).
 - Skips any `(patient, marker)` pair whose H5 already exists — safe to re-run
 - Progress bar shows elapsed, remaining, ETA total, patches/s, and current file:
   ```
   Progress:  12%|█▏  | 6/50 files [00:42<05:01, patches/s=312, ETA total=0:05:43, current=E-21-1234_HER2]
   ```
 
-Override GPU or markers from the command line:
+Common options:
 ```bash
-# force a specific GPU (disables auto-parallel)
-python extract_features_split_channels.py --config multiplex_config.yaml --device cuda:1
+# choose GPU by index (simple form)
+python extract_features_split_channels.py --config multiplex_config.yaml --device 1
 
-# extract only specific markers (disables auto-parallel)
+# extract only specific markers
 python extract_features_split_channels.py --config multiplex_config.yaml --markers HER2 DAPI
+
+# process slides 2,3,4 only
+python extract_features_split_channels.py --config multiplex_config.yaml --slide-index 2 --num-slides 3
+
+# opt in to multi-GPU parallel workers
+python extract_features_split_channels.py --config multiplex_config.yaml --parallel
 ```
 
 ### Multi-channel extraction
@@ -311,18 +318,22 @@ Writes one H5 per patient with all marker embeddings:
 python extract_features_multi_channels.py --config multiplex_config.yaml
 ```
 
-- **Multi-GPU**: automatically detected — slides are split evenly across all GPUs, one subprocess per GPU. No flags needed.
+- **Default**: one-by-one (`--slide-index 0 --num-slides 1`) on one process.
+- **Parallel**: opt-in with `--parallel` (slides split across GPUs).
 - Skips slides whose H5 already exists — safe to re-run
 - Channels without `mean`/`std` in the config are passed through without normalization
 - Images with more channels than defined markers are sliced to match; images with fewer are skipped
 
-Override GPU or slide range from the command line:
+Common options:
 ```bash
-# force a specific GPU (disables auto-parallel)
-python extract_features_multi_channels.py --config multiplex_config.yaml --device cuda:0
+# choose GPU by index (simple form)
+python extract_features_multi_channels.py --config multiplex_config.yaml --device 0
 
-# process a specific slice of slides (used internally by the parallel launcher)
-python extract_features_multi_channels.py --config multiplex_config.yaml --device cuda:0 --slide-start 0 --slide-end 10
+# process slides 0..9
+python extract_features_multi_channels.py --config multiplex_config.yaml --slide-index 0 --num-slides 10
+
+# opt in to multi-GPU parallel workers
+python extract_features_multi_channels.py --config multiplex_config.yaml --parallel
 ```
 
 ### Quick test run (subset of slides)

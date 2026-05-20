@@ -76,9 +76,26 @@ def _discover_slide_files(root: Path) -> list[Path]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Split-channel KRONOS feature extraction")
     p.add_argument("--config", default="multiplex_config.yaml", help="Path to multiplex_config.yaml")
-    p.add_argument("--device", default=None, help="Override config device (e.g. cuda:0)")
+    p.add_argument(
+        "--device",
+        default=None,
+        help="GPU index like 0/1 or full torch device string like cuda:0/cpu",
+    )
+    p.add_argument("--parallel", action="store_true", help="Opt-in: split marker work across all visible GPUs")
+    p.add_argument("--slide-index", type=int, default=0, help="Start slide index (default: 0)")
+    p.add_argument("--num-slides", type=int, default=1, help="How many slides to process from slide-index (default: 1)")
     p.add_argument("--markers", nargs="*", default=None, help="Override markers_to_extract")
     return p.parse_args()
+
+
+def _normalize_device_arg(device_arg: str | None) -> str | None:
+    """Map simple GPU index args like '0'/'1' to torch devices."""
+    if device_arg is None:
+        return None
+    d = str(device_arg).strip()
+    if d.isdigit():
+        return f"cuda:{d}"
+    return d
 
 
 def _metadata_csv_candidates(cfg_path: str, raw_cfg: dict | None = None) -> list[Path]:
@@ -205,7 +222,7 @@ class SplitChannelDataset(IterableDataset):
     reading one channel at a time from the qptiff.
     """
 
-    def __init__(self, config: dict, shuffle: bool = False):
+    def __init__(self, config: dict, shuffle: bool = False, slide_start: int | None = None, slide_end: int | None = None):
         self.h5_path = Path(config["h5_path"])
         self.patch_size = config["patch_size"]
         self.marker_order = config["marker_order"]
@@ -215,6 +232,8 @@ class SplitChannelDataset(IterableDataset):
 
         root = Path(config["multiplex_image_path"])
         all_slides = _discover_slide_files(root)
+        if slide_start is not None or slide_end is not None:
+            all_slides = all_slides[slide_start:slide_end]
 
         self.file_paths = []
         for slide in all_slides:
@@ -247,13 +266,13 @@ class SplitChannelDataset(IterableDataset):
                     yield normalizer(patch), x, y, fname
 
 
-def run(config: dict) -> None:
+def run(config: dict, slide_start: int | None = None, slide_end: int | None = None) -> None:
     assert config["patch_size"] % 16 == 0, "patch_size must be divisible by 16"
 
     out_dir = Path(config["h5_path"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = SplitChannelDataset(config)
+    dataset = SplitChannelDataset(config, slide_start=slide_start, slide_end=slide_end)
     if not dataset.file_paths:
         print("Nothing to process — all H5 files already exist.")
         return
@@ -364,8 +383,11 @@ if __name__ == "__main__":
     config = build_config(args.config)
 
     # Apply CLI overrides
-    if args.device:
-        config["device"] = args.device
+    normalized_device = _normalize_device_arg(args.device)
+    if normalized_device:
+        config["device"] = normalized_device
+    slide_start = args.slide_index
+    slide_end = args.slide_index + args.num_slides
     if args.markers:
         all_markers = config["marker_order"]
         names = [m for m in all_markers if m in args.markers]
@@ -374,9 +396,9 @@ if __name__ == "__main__":
         config["marker_means"] = [config["marker_means"][i] for i in idxs]
         config["marker_stds"] = [config["marker_stds"][i] for i in idxs]
 
-    # Auto-parallel: split markers across all available GPUs
+    # Parallel only when explicitly requested.
     n_gpus = torch.cuda.device_count()
-    if n_gpus > 1 and args.device is None and args.markers is None:
+    if args.parallel and n_gpus > 1:
         all_markers = config["marker_order"]
         # If fewer markers than GPUs, distribute by marker; otherwise round-robin
         chunks = [all_markers[i::n_gpus] for i in range(n_gpus)]
@@ -389,6 +411,8 @@ if __name__ == "__main__":
             cmd = [
                 sys.executable, __file__,
                 "--config", args.config,
+                "--slide-index", str(slide_start if slide_start is not None else 0),
+                "--num-slides", str((slide_end - (slide_start or 0)) if slide_end is not None else args.num_slides),
                 "--device", "cuda:0",
                 "--markers", *chunk,
             ]
@@ -397,4 +421,4 @@ if __name__ == "__main__":
         for p in procs:
             p.wait()
     else:
-        run(config)
+        run(config, slide_start=slide_start, slide_end=slide_end)
