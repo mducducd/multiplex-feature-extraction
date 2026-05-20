@@ -315,7 +315,7 @@ Writes one H5 per patient with all marker embeddings:
 python extract_features_multi_channels.py --config multiplex_config.yaml
 ```
 
-- **Default**: one-by-one (`--slide-index 0 --num-slides 1`) on one process.
+- **Default**: one-by-one over all remaining slides on one process.
 - **Parallel**: opt-in with `--parallel` (slides split across GPUs).
 - Skips slides whose H5 already exists — safe to re-run
 - Channels without `mean`/`std` in the config are passed through without normalization
@@ -326,14 +326,14 @@ Common options:
 # choose GPU by index (simple form)
 python extract_features_multi_channels.py --config multiplex_config.yaml --device 0
 
-# process slides 0..9
-python extract_features_multi_channels.py --config multiplex_config.yaml --slide-index 0 --num-slides 10
-
 # opt in to multi-GPU parallel workers
 python extract_features_multi_channels.py --config multiplex_config.yaml --parallel
 ```
 
-### Quick test run (subset of slides)
+### Quick test helper
+
+`run_split_channels_test.py` is a separate helper for small smoke tests. It can
+copy a temporary config and restrict the run to a small slide subset:
 
 ```bash
 python run_split_channels_test.py \
@@ -354,7 +354,7 @@ Options:
 
 ---
 
-## Training (optional)
+## Downstream Training (optional)
 
 After we have extracted feaure we can use [STAMP](https://github.com/KatherLab/STAMP) CLI for training, cross-validation, statistics, and heatmaps. It requires STAMP to be installed
 

@@ -88,8 +88,6 @@ def parse_args() -> argparse.Namespace:
         help="GPU index like 0/1 or full torch device string like cuda:0/cpu",
     )
     p.add_argument("--parallel", action="store_true", help="Opt-in: split slides across all visible GPUs")
-    p.add_argument("--slide-index", type=int, default=0, help="Start slide index (default: 0)")
-    p.add_argument("--num-slides", type=int, default=1, help="How many slides to process from slide-index (default: 1)")
     return p.parse_args()
 
 
@@ -101,6 +99,27 @@ def _normalize_device_arg(device_arg: str | None) -> str | None:
     if d.isdigit():
         return f"cuda:{d}"
     return d
+
+
+def _worker_slide_bounds() -> tuple[int | None, int | None]:
+    """Internal range used by --parallel subprocesses."""
+    start = os.environ.get("MULTIPLEX_SLIDE_START")
+    end = os.environ.get("MULTIPLEX_SLIDE_END")
+    return (
+        int(start) if start is not None else None,
+        int(end) if end is not None else None,
+    )
+
+
+def _finalize_h5_entry(h5_files: dict, fname: str) -> bool:
+    """Close a partial H5 and atomically promote it to the final path."""
+    entry = h5_files.pop(fname, None)
+    if entry is None:
+        return False
+    entry["file"].flush()
+    entry["file"].close()
+    os.replace(entry["tmp_path"], entry["final_path"])
+    return True
 
 
 def _metadata_csv_candidates(cfg_path: str, raw_cfg: dict | None = None) -> list[Path]:
@@ -331,13 +350,8 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
 
     def _finalize_one(fname: str) -> None:
         nonlocal finalized_count
-        entry = h5_files.pop(fname, None)
-        if entry is None:
-            return
-        entry["file"].flush()
-        entry["file"].close()
-        os.replace(entry["tmp_path"], entry["final_path"])
-        finalized_count += 1
+        if _finalize_h5_entry(h5_files, fname):
+            finalized_count += 1
 
     try:
         for batch, coord_x, coord_y, fname in dataloader:
@@ -442,8 +456,7 @@ if __name__ == "__main__":
     if normalized_device:
         config["device"] = normalized_device
 
-    slide_start = args.slide_index
-    slide_end = args.slide_index + args.num_slides
+    slide_start, slide_end = _worker_slide_bounds()
 
     # Parallel only when explicitly requested.
     n_gpus = torch.cuda.device_count()
@@ -466,11 +479,14 @@ if __name__ == "__main__":
                 cmd = [
                     sys.executable, __file__,
                     "--config", args.config,
-                    "--slide-index", str(start),
-                    "--num-slides", str(end - start),
                     "--device", "cuda:0",
                 ]
-                env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_idx)}
+                env = {
+                    **os.environ,
+                    "CUDA_VISIBLE_DEVICES": str(gpu_idx),
+                    "MULTIPLEX_SLIDE_START": str(start),
+                    "MULTIPLEX_SLIDE_END": str(end),
+                }
                 procs.append(subprocess.Popen(cmd, env=env))
             for p in procs:
                 p.wait()

@@ -96,6 +96,17 @@ def _normalize_device_arg(device_arg: str | None) -> str | None:
     return d
 
 
+def _finalize_h5_entry(h5_files: dict, fname: str) -> bool:
+    """Close a partial H5 and atomically promote it to the final path."""
+    entry = h5_files.pop(fname, None)
+    if entry is None:
+        return False
+    entry["file"].flush()
+    entry["file"].close()
+    os.replace(entry["tmp_path"], entry["final_path"])
+    return True
+
+
 def _metadata_csv_candidates(cfg_path: str, raw_cfg: dict | None = None) -> list[Path]:
     """Return candidate marker metadata CSV paths, in lookup priority order."""
     cfg_dir = Path(cfg_path).resolve().parent
@@ -309,13 +320,8 @@ def run(config: dict) -> None:
 
     def _finalize_one(fname: str) -> None:
         nonlocal finalized_count
-        entry = h5_files.pop(fname, None)
-        if entry is None:
-            return
-        entry["file"].flush()
-        entry["file"].close()
-        os.replace(entry["tmp_path"], entry["final_path"])
-        finalized_count += 1
+        if _finalize_h5_entry(h5_files, fname):
+            finalized_count += 1
 
     try:
         for batch, coord_x_batch, coord_y_batch, fname_batch in dataloader:
