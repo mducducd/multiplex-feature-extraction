@@ -287,7 +287,7 @@ Writes one H5 per `(patient, marker)` pair — ideal for per-marker MIL:
 python extract_features_split_channels.py --config multiplex_config.yaml
 ```
 
-- **Default**: one-by-one (`--slide-index 0 --num-slides 1`) on one process.
+- **Default**: one-by-one over all remaining slides on one process.
 - **Parallel**: opt-in with `--parallel` (markers distributed round-robin across GPUs).
 - Skips any `(patient, marker)` pair whose H5 already exists — safe to re-run
 - Progress bar shows elapsed, remaining, ETA total, patches/s, and current file:
@@ -302,9 +302,6 @@ python extract_features_split_channels.py --config multiplex_config.yaml --devic
 
 # extract only specific markers
 python extract_features_split_channels.py --config multiplex_config.yaml --markers HER2 DAPI
-
-# process slides 2,3,4 only
-python extract_features_split_channels.py --config multiplex_config.yaml --slide-index 2 --num-slides 3
 
 # opt in to multi-GPU parallel workers
 python extract_features_split_channels.py --config multiplex_config.yaml --parallel

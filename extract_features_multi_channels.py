@@ -318,17 +318,26 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
     tokens_per_side = config["patch_size"] // 16
     total = len(dataset.file_paths)
     h5_files: dict = {}
-    file_count = 0
+    finalized_count = 0
     active_fname = None
     patches_done = 0
     t_start = time.time()
-    run_successful = False
 
     pbar = tqdm(total=total, desc="Progress", unit="file",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} files "
                             "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
 
     skip_fnames: set = set()
+
+    def _finalize_one(fname: str) -> None:
+        nonlocal finalized_count
+        entry = h5_files.pop(fname, None)
+        if entry is None:
+            return
+        entry["file"].flush()
+        entry["file"].close()
+        os.replace(entry["tmp_path"], entry["final_path"])
+        finalized_count += 1
 
     try:
         for batch, coord_x, coord_y, fname in dataloader:
@@ -349,6 +358,8 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
                     tqdm.write(f"NaN — skipping {sample_fname} at ({cx_np[i]}, {cy_np[i]})")
                     continue
 
+                if active_fname is not None and sample_fname != active_fname:
+                    _finalize_one(active_fname)
                 if sample_fname not in h5_files:
                     pbar.update(1)
                     active_fname = sample_fname
@@ -391,7 +402,6 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
                         "coord_x_ds": hf.create_dataset("coord_x", shape=(0,), maxshape=(None,), dtype="i"),
                         "coord_y_ds": hf.create_dataset("coord_y", shape=(0,), maxshape=(None,), dtype="i"),
                     }
-                    file_count += 1
 
                 entry = h5_files[sample_fname]
                 n = entry["patch_ds"].shape[0]
@@ -412,18 +422,16 @@ def run(config: dict, slide_start: int = None, slide_end: int = None) -> None:
             eta_total = str(timedelta(seconds=int(elapsed / pbar.n * total))) if pbar.n > 0 else "?"
             pbar.set_postfix({"patches/s": f"{patch_rate:.0f}", "ETA total": eta_total, "current": active_fname}, refresh=False)
 
-        run_successful = True
+        if active_fname is not None:
+            _finalize_one(active_fname)
 
     finally:
         pbar.close()
         for entry in h5_files.values():
             entry["file"].close()
-        if run_successful:
-            for entry in h5_files.values():
-                os.replace(entry["tmp_path"], entry["final_path"])
 
     elapsed_total = timedelta(seconds=int(time.time() - t_start))
-    print(f"\nDone. {len(h5_files)} H5 files written to {out_dir} in {elapsed_total}")
+    print(f"\nDone. {finalized_count} H5 files written to {out_dir} in {elapsed_total}")
 
 
 if __name__ == "__main__":

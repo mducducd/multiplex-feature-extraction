@@ -82,8 +82,6 @@ def parse_args() -> argparse.Namespace:
         help="GPU index like 0/1 or full torch device string like cuda:0/cpu",
     )
     p.add_argument("--parallel", action="store_true", help="Opt-in: split marker work across all visible GPUs")
-    p.add_argument("--slide-index", type=int, default=0, help="Start slide index (default: 0)")
-    p.add_argument("--num-slides", type=int, default=1, help="How many slides to process from slide-index (default: 1)")
     p.add_argument("--markers", nargs="*", default=None, help="Override markers_to_extract")
     return p.parse_args()
 
@@ -222,7 +220,7 @@ class SplitChannelDataset(IterableDataset):
     reading one channel at a time from the qptiff.
     """
 
-    def __init__(self, config: dict, shuffle: bool = False, slide_start: int | None = None, slide_end: int | None = None):
+    def __init__(self, config: dict, shuffle: bool = False):
         self.h5_path = Path(config["h5_path"])
         self.patch_size = config["patch_size"]
         self.marker_order = config["marker_order"]
@@ -232,8 +230,6 @@ class SplitChannelDataset(IterableDataset):
 
         root = Path(config["multiplex_image_path"])
         all_slides = _discover_slide_files(root)
-        if slide_start is not None or slide_end is not None:
-            all_slides = all_slides[slide_start:slide_end]
 
         self.file_paths = []
         for slide in all_slides:
@@ -266,13 +262,13 @@ class SplitChannelDataset(IterableDataset):
                     yield normalizer(patch), x, y, fname
 
 
-def run(config: dict, slide_start: int | None = None, slide_end: int | None = None) -> None:
+def run(config: dict) -> None:
     assert config["patch_size"] % 16 == 0, "patch_size must be divisible by 16"
 
     out_dir = Path(config["h5_path"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = SplitChannelDataset(config, slide_start=slide_start, slide_end=slide_end)
+    dataset = SplitChannelDataset(config)
     if not dataset.file_paths:
         print("Nothing to process — all H5 files already exist.")
         return
@@ -302,15 +298,24 @@ def run(config: dict, slide_start: int | None = None, slide_end: int | None = No
 
     total = len(dataset.file_paths)
     h5_files: dict = {}
-    file_count = 0
+    finalized_count = 0
     active_fname = None
     patches_done = 0
     t_start = time.time()
-    run_successful = False
 
     pbar = tqdm(total=total, desc="Progress", unit="file",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} files "
                             "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
+
+    def _finalize_one(fname: str) -> None:
+        nonlocal finalized_count
+        entry = h5_files.pop(fname, None)
+        if entry is None:
+            return
+        entry["file"].flush()
+        entry["file"].close()
+        os.replace(entry["tmp_path"], entry["final_path"])
+        finalized_count += 1
 
     try:
         for batch, coord_x_batch, coord_y_batch, fname_batch in dataloader:
@@ -326,6 +331,8 @@ def run(config: dict, slide_start: int | None = None, slide_end: int | None = No
                     tqdm.write(f"NaN — skipping {fname} at ({cx_np[i]}, {cy_np[i]})")
                     continue
 
+                if active_fname is not None and fname != active_fname:
+                    _finalize_one(active_fname)
                 if fname not in h5_files:
                     pbar.update(1)
                     active_fname = fname
@@ -347,7 +354,6 @@ def run(config: dict, slide_start: int | None = None, slide_end: int | None = No
                         "coord_x_ds": hf.create_dataset("coord_x", shape=(0,), maxshape=(None,), dtype="i"),
                         "coord_y_ds": hf.create_dataset("coord_y", shape=(0,), maxshape=(None,), dtype="i"),
                     }
-                    file_count += 1
 
                 entry = h5_files[fname]
                 n = entry["patch_ds"].shape[0]
@@ -364,18 +370,16 @@ def run(config: dict, slide_start: int | None = None, slide_end: int | None = No
             eta_total = str(timedelta(seconds=int(elapsed / pbar.n * total))) if pbar.n > 0 else "?"
             pbar.set_postfix({"patches/s": f"{patch_rate:.0f}", "ETA total": eta_total, "current": active_fname}, refresh=False)
 
-        run_successful = True
+        if active_fname is not None:
+            _finalize_one(active_fname)
 
     finally:
         pbar.close()
         for entry in h5_files.values():
             entry["file"].close()
-        if run_successful:
-            for entry in h5_files.values():
-                os.replace(entry["tmp_path"], entry["final_path"])
 
     elapsed_total = timedelta(seconds=int(time.time() - t_start))
-    print(f"\nDone. {len(h5_files)} H5 files written to {out_dir} in {elapsed_total}")
+    print(f"\nDone. {finalized_count} H5 files written to {out_dir} in {elapsed_total}")
 
 
 if __name__ == "__main__":
@@ -386,8 +390,6 @@ if __name__ == "__main__":
     normalized_device = _normalize_device_arg(args.device)
     if normalized_device:
         config["device"] = normalized_device
-    slide_start = args.slide_index
-    slide_end = args.slide_index + args.num_slides
     if args.markers:
         all_markers = config["marker_order"]
         names = [m for m in all_markers if m in args.markers]
@@ -411,8 +413,6 @@ if __name__ == "__main__":
             cmd = [
                 sys.executable, __file__,
                 "--config", args.config,
-                "--slide-index", str(slide_start if slide_start is not None else 0),
-                "--num-slides", str((slide_end - (slide_start or 0)) if slide_end is not None else args.num_slides),
                 "--device", "cuda:0",
                 "--markers", *chunk,
             ]
@@ -421,4 +421,4 @@ if __name__ == "__main__":
         for p in procs:
             p.wait()
     else:
-        run(config, slide_start=slide_start, slide_end=slide_end)
+        run(config)
