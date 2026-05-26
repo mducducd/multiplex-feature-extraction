@@ -330,20 +330,6 @@ python extract_features_multi_channels.py --config multiplex_config.yaml --devic
 python extract_features_multi_channels.py --config multiplex_config.yaml --parallel
 ```
 
-### Quick test helper
-
-`run_split_channels_test.py` is a separate helper for small smoke tests. It can
-copy a temporary config and restrict the run to a small slide subset:
-
-```bash
-python run_split_channels_test.py \
-    --base-config multiplex_config.yaml \
-    --num-slides 3 \
-    --markers HER2 DAPI \
-    --device cuda \
-    --work-dir temp/test_run
-```
-
 Options:
 - `--num-slides N` — how many slides to process
 - `--markers` — subset of markers (space-separated)
